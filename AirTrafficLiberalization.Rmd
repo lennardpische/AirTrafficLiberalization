@@ -1,0 +1,145 @@
+---
+title: "Final Paper ECON970 - Final Version with Gravity Controls"
+author: "Lenny"
+date: "2025-04-28"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(knitr)
+library(ggplot2)
+library(fixest)
+library(lubridate)
+library(modelsummary)
+library(stargazer)
+library(countrycode)
+``` 
+
+```{r load_data}
+# Load BTS data
+data_2016 <- read.csv("T_T100I_MARKET_ALL_CARRIER.csv")
+data_2017 <- read.csv("T_T100I_MARKET_ALL_CARRIER 2.csv")
+data_2018 <- read.csv("T_T100I_MARKET_ALL_CARRIER 3.csv")
+data_2019 <- read.csv("T_T100I_MARKET_ALL_CARRIER 4.csv")
+data_2020 <- read.csv("T_T100I_MARKET_ALL_CARRIER 5.csv") %>%
+  filter(MONTH < 3)
+combined_data <- bind_rows(data_2016, data_2017, data_2018, data_2019, data_2020)
+
+# Load Gravity data
+gravity_data <- read.csv("Gravity_csv_V202211/Gravity_V202211.csv") |>
+  filter(year >= 2016 & year <= 2020)
+``` 
+
+```{r iso_mapping}
+iso_mapping <- tibble(
+  ISO3 = countrycode::codelist$iso3c,
+  COUNTRY_NAME = countrycode::codelist$country.name.en
+)
+``` 
+
+```{r clean_data}
+# Clean BTS and define country pairs
+bts_clean <- combined_data %>%
+  mutate(
+    ROUTE = paste(ORIGIN_COUNTRY_NAME, DEST_COUNTRY_NAME, sep = "-"),
+    ROUTE_REVERSED = paste(DEST_COUNTRY_NAME, ORIGIN_COUNTRY_NAME, sep = "-"),
+    COUNTRY_PAIR = pmin(ROUTE, ROUTE_REVERSED),
+    YearMonth = as.Date(paste(YEAR, MONTH, "01", sep = "-"))
+  ) %>%
+  group_by(COUNTRY_PAIR, YearMonth) %>%
+  summarise(PASSENGERS = sum(PASSENGERS, na.rm = TRUE), .groups = "drop") %>%
+  mutate(BRAZIL_ROUTE = ifelse(COUNTRY_PAIR == "Brazil-United States", 1, 0))
+``` 
+
+```{r filter_model_data}
+bts_model <- bts_clean %>%
+  filter(YearMonth <= as.Date("2020-02-01")) %>%
+  mutate(
+    POST_2018 = ifelse(YearMonth >= as.Date("2018-04-01"), 1, 0),
+    ln_PASSENGERS = log1p(PASSENGERS),
+    TREAT = BRAZIL_ROUTE * POST_2018,
+    BRAZIL_RECESSION = ifelse(BRAZIL_ROUTE == 1 & YearMonth %in% seq(as.Date("2019-08-01"), as.Date("2019-12-01"), by = "1 month"), 1, 0),
+    TREAT_RECESSION = BRAZIL_ROUTE * BRAZIL_RECESSION
+  )
+``` 
+
+```{r merge_gravity}
+# Gravity data with explicit US identification
+gravity_named <- gravity_data %>%
+  left_join(iso_mapping, by = c("iso3_o" = "ISO3")) %>%
+  rename(FOREIGN_COUNTRY = COUNTRY_NAME) %>%
+  filter(iso3_d == "USA") %>%
+  select(year, FOREIGN_COUNTRY, gdp_o, pop_o)
+
+# Join with BTS model
+bts_model <- bts_model %>%
+  mutate(
+    FOREIGN_COUNTRY = str_replace(COUNTRY_PAIR, "United States-", ""),
+    FOREIGN_COUNTRY = str_replace(FOREIGN_COUNTRY, "-United States", ""),
+    YEAR = year(YearMonth)
+  ) %>%
+  left_join(gravity_named, by = c("FOREIGN_COUNTRY", "YEAR" = "year")) %>%
+  mutate(
+    ln_gdp_foreign = log1p(gdp_o),
+    ln_pop_foreign = log1p(pop_o)
+  )
+``` 
+
+```{r run_did_updated}
+did_model_with_gravity <- feols(
+  ln_PASSENGERS ~ TREAT + TREAT_RECESSION + ln_gdp_foreign + ln_pop_foreign | COUNTRY_PAIR + YearMonth,
+  data = bts_model,
+  cluster = ~COUNTRY_PAIR
+)
+summary(did_model_with_gravity)
+``` 
+
+```{r plot_averages}
+# Step 1: Calculate group averages
+plot_data <- bts_model %>%
+  mutate(Group = ifelse(BRAZIL_ROUTE == 1, "US–Brazil", "Other US–Foreign")) %>%
+  group_by(Group, YearMonth) %>%
+  summarise(AVG_PASSENGERS = mean(PASSENGERS, na.rm = TRUE), .groups = "drop")
+
+# Step 2: Normalize to March 2018 = 100
+plot_data_normalized <- plot_data %>%
+  group_by(Group) %>%
+  mutate(
+    BASE = AVG_PASSENGERS[YearMonth == as.Date("2018-03-01")],
+    INDEXED_PASSENGERS = (AVG_PASSENGERS / BASE) * 100
+  )
+
+# Step 3: Plot
+ggplot(plot_data_normalized, aes(x = YearMonth, y = INDEXED_PASSENGERS, color = Group)) +
+  geom_line(size = 0.7, linetype = "dashed") +
+  geom_vline(xintercept = as.Date("2018-03-01"), color = "black") +
+  geom_vline(xintercept = as.Date("2019-08-01"),  color = "red") +
+  labs(
+    title = "Passenger Volumes: US–Brazil vs. US–Foreign Routes",
+    x = "Month", 
+    y = "Index (March 2018 = 100)",
+    caption = "Dashed = Policy (2018), Red = Brazil Recession (Aug 2019)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(legend.title = element_blank()) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_color_manual(values = c("darkorange","darkgreen"))
+ggsave("us-brazil updates.png")
+```
+
+```{r model_summary}
+res<- modelsummary(
+  list("Log(Passengers) Specification" = did_model_with_gravity),
+  output = "latex", 
+  estimate = "{estimate}{stars}",
+  statistic = "({std.error})",
+  stars = c("*" = 0.1, "**" = 0.05, "***" = 0.01),
+  title = "Difference-in-Differences: Log Passenger Volumes with Gravity Controls",
+  gof_omit = "IC|Log|Adj|AIC|BIC"
+)
+res
+```
