@@ -38,6 +38,6 @@ $$ \ln(\text{Passengers})_{it} = \alpha + \beta_1 \text{TREAT} + \beta_2 \text{T
 
 ## 📂 Repository Structure
 ```text
-├── Final Paper EC970.Rmd          # Source code for data cleaning, regression, and visualization
+├── AirTrafficLiberalization.Rmd   # Source code for data cleaning, regression, and visualization
 ├── AirTrafficLiberalization.pdf   # Final research paper with full econometric analysis
 └── README.md                      # Project documentation
